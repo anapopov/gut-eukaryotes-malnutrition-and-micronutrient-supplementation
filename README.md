@@ -1,2 +1,3 @@
-Gut eukaryote and bacterial association with malnutrition and micronutrient supplementation
+# Gut eukaryote and bacterial association with micronutrient supplementation, nutritional status and locality
+
 Collection of codes used in the analysis of 16S and 18S rRNA sequencing surveys, carried out on stool DNA from undernourished children and those within a healthy length-for-height z-score, from Pakistan. Cohort includes 80 children sampled at 12 and 24 months of age as part of previous cluster randomized controlled trial examining effect of micronutrient supplementation on growth and morbidity (ClinicalTrials.gov identifier NCT00705445). Raw sequence data is available from the NCBI Sequence Read Archive (BioProject identifier PRJNA717317).
