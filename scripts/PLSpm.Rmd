@@ -1,0 +1,3653 @@
+---
+title: "BiomiXx: Microbiome and Parasitome study of children from Pakistan with moderate malnutrition: PLS path"
+author: "Ana Popovic and Celine Bourdon"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: true # add table of content
+    theme:  yeti # theme:united
+    toc_float: TRUE # add table of content as a float on left side
+    toc_depth: 3 # up to 3 depths of headings (specified by #, ## and ###)
+---
+
+General Setup: set working directory, activate packages and load in data.  
+```{r}
+
+knitr::opts_chunk$set(warning = F, message = F, echo = F, dpi = 180, fig.width = 10, fig.height = 10, fig.align="center")
+
+##set overall theme
+theme_set(theme_minimal())
+
+```
+
+
+
+## 0. Set up, load packages ===========================================
+
+```{r, include=FALSE}
+
+# install_github("gastonstat/plspm")
+library(pacman)
+
+# make list of needed packages
+p_load("tidyverse","mgsub","here","arsenal","SNFtool","e1071",
+        "caret","missMDA","FactoMineR", "plsdepot", "plspm",
+        "ggpubr","mixOmics","gtools","kableExtra","devtools",
+         "GGally","caret", "compositions","varhandle")
+
+```
+
+
+
+## 1. Load data, pull idata ===========================================
+
+
+```{r, include = F}
+
+#choose.files()
+data <- read.csv(paste0(dirname(here()), "/5-Data","/Fulldata_wOTU_Bac&Euk_2021-04-16.csv"), na.strings = c("NA", NA, "") , row.names=1)
+head(data)
+
+taxa_otu <- read.csv(paste0(dirname(here()), "/5-Data","/Raw_data/Bac_16S_tax_table.csv"), na.strings = c("NA", NA, "") , row.names=1)
+head(taxa_otu)
+
+taxa_euk <- read.csv(paste0(dirname(here()), "/5-Data","/Raw_data/microbes_genus_TAX_table_2021-04-14.csv"), na.strings = c("NA", NA, "") , row.names=1)
+head(taxa_euk)
+
+### create subset of interest
+#dput(colnames(data))[1:500]
+idata<-data %>% 
+  dplyr::select("sid", "center", "group_whz_24","arm",
+         "biomiXx","gender","low_birthweight",
+         #"gestational_age","premature",
+         #"initial_BF", "exclusive_BF_6",
+         #"amilk_6", "amilk_age_months_6", 
+         #"compl_feeding_6", "compl_feeding_age_months_6",
+         starts_with("ht_"), starts_with("wt_"), starts_with("whz_"), 
+         contains("muac"), contains("edema"),
+                      
+## bacteria
+          starts_with("T12_Otu"), starts_with("T24_Otu"),  
+          starts_with("T12_std_Otu"), starts_with("T24_std_Otu"), 
+          contains("T12_genus_std_"),contains("T24_genus_std_"),
+                       
+## eukaryotes
+          starts_with("T12_genus_euk"),  starts_with("T24_genus_euk"),
+          starts_with("T12_j"), starts_with("T24_j"),
+          starts_with("T12_m"), starts_with("T24_m"),
+          #-contains("_bin")
+          #contains("_bin_num")
+                       )
+#head(idata)
+dput(colnames(idata))
+
+```
+
+Full dataset size: `r dim(data)`
+* clinical variables: demographics, anthropometry
+* microbiome: T12 and T24 Otu, DEseq standardized and genus level data
+* eukaryotes: T12 and T24 _m and _j at genus level
+
+
+
+## 2. Set factors ===========================================
+
+```{r, include = F}
+
+colnames(idata)
+str(idata)
+
+idata$arm <- as.numeric(mgsub(idata$arm, c("control", "MNP", "MNP_Zinc"), c(0,1,2)))
+idata$center <- as.numeric(mgsub(idata$center, c("Urban", "Rural"), c(0,1)))
+
+#str(idata)
+list.factor<-idata %>% dplyr::select("sid", "center", "group_whz_24","arm",
+                       "biomiXx",
+                       "gender","low_birthweight",
+                      # "premature",
+                      # "initial_BF", "exclusive_BF_6",
+                      # "amilk_6", "amilk_age_months_6",
+                      # "compl_feeding_6", "compl_feeding_age_months_6",
+                      #  contains("edema")
+                        ) %>% colnames()
+
+
+idata[,list.factor]<-lapply(idata[,list.factor], factor )
+
+```
+
+
+
+## 3. Preprocessing OTU data
+
+### 3.1 Near ZeroVar identify [ Not Run ]
+
+Low pass filter to remove variables that are not showing enough variance
+
+```{r, include=FALSE}
+
+# colnames.NearZero<-caret::nearZeroVar(idata)
+# colnames.NearZero
+# head(idata[,colnames.NearZero])
+
+# # take out
+# idata<-idata[,-colnames.NearZero]
+# #colnames(idata)
+
+```
+
+
+
+### 3.2 Low count filter
+
+
+```{r, include=FALSE}
+
+### create a dataframe based on sample IDs
+
+## T12 data
+data.raw12 = idata %>% dplyr::select(starts_with("T12_"))
+str(data.raw12)
+##T24 data
+data.raw24 = idata %>% dplyr::select(starts_with("T24_"))
+str(data.raw24)
+
+## add in sample id annotation
+data.raw12$sample_id<-paste0("T12_", rownames(data.raw12))
+data.raw24$sample_id<-paste0("T24_", rownames(data.raw24))
+
+### remove Time annotation on OTUs
+colnames(data.raw12)<-gsub("T12_","", colnames(data.raw12))
+colnames(data.raw24)<-gsub("T24_","",colnames(data.raw24))
+
+head(data.raw12)
+data.raw12$sample_id
+
+head(data.raw24)
+data.raw24$sample_id
+## merge data based on sample id
+data.raw <- full_join(data.raw12, data.raw24)
+colnames(data.raw)
+rownames(data.raw)
+data.raw$sample_id
+
+## replace NA values by 0: cases were an organism is only detected at one timepoint
+data.raw[is.na(data.raw)] <-0
+data.raw[is.na(data.raw)] 
+
+### remove sample id
+data.raw<- data.raw %>% dplyr::select(-sample_id)
+
+### add offset 
+data.raw<-data.raw+1
+head(data.raw)
+
+
+### filtering out OTUs for which the sum of counts are below a certain threshold compared to the total sum of all counts.
+low.count.removal = function(data, 
+                    # OTU count data frame of size n (sample) x p (OTU)
+                    percent=0.01 # cutoff chosen
+                        ){
+    keep.otu = which(colSums(data)*100/(sum(colSums(data))) > percent)
+    data.filter = data[,keep.otu]
+    return(list(data.filter = data.filter, keep.otu = keep.otu))
+}
+
+colnames(data.raw)
+
+
+### Apply function to remove low counts
+result.filter = low.count.removal(data.raw, percent=0.01)
+data.filter = result.filter$data.filter
+colnames(data.filter)
+
+length(result.filter$keep.otu) 
+
+```
+
+List of variables kept after cut off: 
+`r colnames(data.filter)`
+
+
+## Library size: Plotting Bacteria OTU counts across samples
+
+```{r, fig.height=15}
+
+#head(data.filter24)
+libsize <- data.filter %>% dplyr::select(starts_with("Otu"))
+libsize$sid<-c(paste0(idata$sid, "_T12"), paste0(idata$sid, "_T24") )
+
+libsize_std <- data.filter %>% dplyr::select(starts_with("std_O"))
+libsize_std$sid<-c(paste0(idata$sid, "_T12"), paste0(idata$sid, "_T24") )
+
+libsize_genus_std <- data.filter %>% dplyr::select(starts_with("genus_std_"))
+libsize_genus_std$sid<-c(paste0(idata$sid, "_T12"), paste0(idata$sid, "_T24") )
+
+```
+
+
+
+#### Raw data
+
+```{r}
+lib.size <- apply(libsize[, !colnames(libsize) %in% c("sid")], 1, sum)
+p_raw<-barplot(lib.size)
+```
+
+
+Which sample has very low library size:
+
+```{r}
+which(lib.size <1500)
+## 33, 93, 100
+
+### Samples to remove
+## T12
+idata[c(33),1:20]
+## T24 (correspondence to participant)
+idata[c((93-80), (100-80)),1:20]
+
+libsize$sid[c(33,93,100)]
+hist(lib.size)
+
+```
+
+
+#### DEseq normalised:
+
+```{r}
+lib.size <- apply(libsize_std[, !colnames(libsize_std) %in% c("sid")], 1, sum)
+p_std<-barplot(lib.size)
+
+```
+
+
+which DEseq has libary size above 2000 000
+```{r}
+which(lib.size > 2000000)
+libsize_std$sid[c(9,29,35, 123)]
+hist(lib.size)
+
+```
+
+
+#### DEseq normalized genus level
+
+```{r}
+lib.size <- apply(libsize_genus_std[, !colnames(libsize_genus_std) %in% c("sid")], 1, sum)
+p_genus<-barplot(lib.size)
+
+```
+
+Which has library size above 2 000 000
+```{r}
+which(lib.size > 2000000)
+libsize_genus_std$sid[c(9,29, 123)]
+hist(lib.size)
+```
+
+
+
+### Plots: Different library sizes
+
+```{r}
+### pivot
+#libsize$sid
+plot_libsize<-pivot_longer(libsize, cols = -sid)
+plot_libsize_std<-pivot_longer(libsize_std,cols = -sid)
+plot_libsize_genus_std<-pivot_longer(libsize_genus_std, cols = -sid)
+
+
+p_raw<-ggplot(aes(x=sid, y=value), data=plot_libsize) +
+  geom_point()+
+  labs(title="Raw")
+
+p_std<-ggplot(aes(x=sid, y=value), data=plot_libsize_std) +
+  geom_point()+
+  labs(title="DEseq std")
+
+
+p_g_std<-ggplot(aes(x=sid, y=value), data=plot_libsize_genus_std) +
+  geom_point()+
+  labs(title="DEseq genus std")
+
+
+ggarrange(p_raw, 
+          p_std,
+          p_g_std, ncol=1, nrow=3)
+
+```
+
+
+### Removing participants with too low counts overall
+
+```{r}
+lib.size <- apply(libsize[, !colnames(libsize) %in% c("sid")], 1, sum)
+list_remove <-which(lib.size <1500)
+list_remove <-libsize$sid[list_remove]
+
+### Samples to remove
+list_remove <-c(list_remove, "210798_T24", "131038_T12", "220402_T12")
+list_remove
+
+libsize <- libsize[!libsize$sid %in% list_remove,]
+lib.size <- apply(libsize[, !colnames(libsize) %in% c("sid")], 1, sum)
+p_rawX<-barplot(lib.size)
+
+### IDs to remove
+#list_remove_ids<-c("210798", "131038", "220402")
+iidata <- idata[!idata$sid %in% c("210798", "131038", "220402"),  ]
+```
+
+
+
+### Centered log ratio transform
+
+clr will not work if NA values.
+
+```{r}
+# we input the data as a matrix, here no need to add an offset as it is already done
+data.clr <- logratio.transfo(as.matrix(libsize[, !colnames(libsize) %in% c("sid")]), logratio = 'CLR', offset = 0) 
+head(data.clr)
+
+### Force to matrix and then dataframe
+class(data.clr) <- "matrix"
+data.clr<-data.frame(data.clr)
+
+### add in ids
+lib.size <- apply(data.clr, 1, sum)
+p_clr<-barplot(lib.size)
+
+```
+
+
+### PCA on clr transformed Otu
+
+```{r}
+#head(iidata)[,1:20]
+
+### run PCA 
+pca.clr <- pca(data.clr)
+plotIndiv(pca.clr, group = c(rep("T12",77), rep("T24",77)), title = 'TimePoint')
+plotVar(pca.clr, title = 'TimePoint', cex=2)
+
+plotIndiv(pca.clr, group = rep(iidata$arm,2), title = 'Rx')
+plotIndiv(pca.clr, group = rep(iidata$center,2), title = 'Center')
+plotIndiv(pca.clr, group = rep(iidata$group_whz_24,2), title = 'Nutritional Status')
+
+```
+
+
+## 4. Preprocessing Eukaryote data
+
+
+#### Eukaryote
+
+```{r}
+
+### select eukaryote
+colnames(data.filter)
+euk_data <- data.filter %>% dplyr::select(starts_with("jotu"), starts_with("motu"))
+dput(colnames(euk_data))
+
+### at genus level
+euk_data_g <- data.filter %>% dplyr::select(starts_with("genus_euk"))
+dput(colnames(euk_data_g))
+
+#### checking heterogeneity
+lib.size <- apply(euk_data[, !colnames(euk_data) %in% c("sid")], 1, sum)
+barplot(lib.size)
+
+#### checking heterogeneity
+lib.size <- apply(euk_data_g, 1, sum)
+barplot(lib.size)
+
+```
+
+
+### Removing participants with too low counts overall
+
+```{r}
+
+### Samples to remove
+list_remove
+
+### add in sample ids to match
+euk_data$sid <- c(paste0(idata$sid, "_T12"), paste0(idata$sid, "_T24") )
+### remove samples with too low counts (from bacteria)  
+euk_data <- euk_data[!euk_data$sid %in% list_remove,]
+
+### plots library size
+lib.size <- apply(euk_data[, !colnames(euk_data) %in% c("sid")], 1, sum)
+p_std<-barplot(lib.size)
+hist(lib.size)
+
+
+### add in sample ids to match 
+euk_data_g$sid <- c(paste0(idata$sid, "_T12"), paste0(idata$sid, "_T24") )
+### remove samples with too low counts (from bacteria)  
+euk_data_g <- euk_data_g[!euk_data_g$sid %in% list_remove,]
+
+### plots library size
+lib.size <- apply(euk_data_g[, !colnames(euk_data_g) %in% c("sid")], 1, sum)
+p_std<-barplot(lib.size)
+hist(lib.size)
+
+```
+
+
+### Log Euk dataset
+
+#### OTU euk
+
+```{r}
+# head(euk_data)
+data.log_euk<-log(as.matrix(euk_data[, !colnames(euk_data) %in% c("sid")]) )
+
+# ### Force to matrix and then dataframe
+ data.log_euk<-data.frame(data.log_euk)
+# 
+# ### add in ids
+ lib.size <- apply(data.log_euk, 1, sum)
+ p_log<-barplot(lib.size)
+ 
+```
+
+
+#### Genus euk
+
+```{r}
+ 
+# head(euk_data)
+data.log_euk_g<-log(as.matrix(euk_data_g[, !colnames(euk_data_g) %in% c("sid")]) )
+
+### Force to matrix and then dataframe
+data.log_euk_g<-data.frame(data.log_euk_g)
+
+### add in ids
+lib.size <- apply(data.log_euk_g, 1, sum)
+p_log<-barplot(lib.size)
+
+```
+
+
+
+### Center log ratio transform
+
+#### OTU euk
+```{r}
+
+# # we input the data as a matrix, here no need to add an offset as it is already done
+data.clr_euk <- logratio.transfo(as.matrix(euk_data[, !colnames(euk_data) %in% c("sid")]), logratio = 'CLR', offset = 0) 
+ head(data.clr)
+# 
+# ### Force to matrix and then dataframe
+ class(data.clr_euk) <- "matrix"
+ data.clr_euk<-data.frame(data.clr_euk)
+# 
+# ### add in ids
+lib.size <- apply(data.clr_euk, 1, sum)
+p_clr<-barplot(lib.size)
+
+```
+
+
+#### Genus euk
+
+```{r}
+
+head(euk_data_g)
+
+# we input the data as a matrix, here no need to add an offset as it is already done
+data.clr_euk_g <- logratio.transfo(as.matrix(euk_data_g[, !colnames(euk_data_g) %in% c("sid")]), logratio = 'CLR', offset = 0) 
+head(data.clr_euk_g)
+
+### Force to matrix and then dataframe
+class(data.clr_euk_g) <- "matrix"
+data.clr_euk_g<-data.frame(data.clr_euk_g)
+
+#data.clr_euk_g <- euk_data_g[, !colnames(euk_data_g) %in% c("sid")]
+### add in ids
+lib.size <- apply(data.clr_euk_g, 1, sum)
+p_clr<-barplot(lib.size)
+
+```
+
+
+
+### Quantile normalise
+
+
+#### OTU euk
+
+```{r, eval=F, include=F}
+# # we input the data as a matrix, here no need to add an offset as it is already done
+data.quantN_euk <- normalize.quantiles(as.matrix(euk_data[, !colnames(euk_data) %in% c("sid")])) 
+ head(data.quantN_euk)
+
+# ### Force to matrix and then dataframe
+ data.quantN_euk<-data.frame(data.quantN_euk)
+colnames(data.quantN_euk) <- colnames(euk_data[, !colnames(euk_data) %in% c("sid")])
+ 
+# ### add in ids
+ lib.size <- apply(data.quantN_euk, 1, sum)
+ p_clr<-barplot(lib.size)
+ 
+```
+
+
+#### Genus euk
+
+```{r, eval=F, include=F}
+
+head(euk_data_g)
+# we input the data as a matrix, here no need to add an offset as it is already done
+data.quantN_euk_g <- normalize.quantiles(as.matrix(euk_data_g[, !colnames(euk_data_g) %in% c("sid")])) 
+head(data.quantN_euk_g)
+
+### Force to matrix and then dataframe
+data.quantN_euk_g<-data.frame(data.quantN_euk_g)
+colnames(data.quantN_euk_g) <- colnames(euk_data_g[, !colnames(euk_data_g) %in% c("sid")])
+### add in ids
+lib.size <- apply(data.quantN_euk_g, 1, sum)
+p_clr<-barplot(lib.size)
+
+```
+
+
+
+### PCA 
+
+#### Clr transformed eukaryote data
+
+
+```{r}
+head(iidata)[,1:20]
+
+### run PCA 
+pca.clr <- pca(data.clr_euk)
+plotIndiv(pca.clr, group = c(rep("T12",77), rep("T24",77)), title = 'TimePoint')
+plotVar(pca.clr, title = 'TimePoint', cex=2)
+
+plotIndiv(pca.clr, group = rep(iidata$arm,2), title = 'Rx')
+plotIndiv(pca.clr, group = rep(iidata$center,2), title = 'Center')
+plotIndiv(pca.clr, group = rep(iidata$group_whz_24,2), title = 'Nutritional Status')
+
+```
+
+
+
+```{r}
+head(iidata)[,1:20]
+
+### run PCA 
+pca.clr <- pca(data.clr_euk_g)
+plotIndiv(pca.clr, group = c(rep("T12",77), rep("T24",77)), title = 'TimePoint')
+plotVar(pca.clr, title = 'TimePoint', cex=2)
+
+plotIndiv(pca.clr, group = rep(iidata$arm,2), title = 'Rx')
+plotIndiv(pca.clr, group = rep(iidata$center,2), title = 'Center')
+plotIndiv(pca.clr, group = rep(iidata$group_whz_24,2), title = 'Nutritional Status')
+
+```
+
+
+
+### PCA on quantile normalised
+
+```{r, eval=F, include=F}
+head(iidata)[,1:20]
+
+pca.clr <- pca(data.quantN_euk)
+plotIndiv(pca.clr, group = c(rep("T12",77), rep("T24",77)), title = 'TimePoint')
+plotVar(pca.clr, title = 'TimePoint', cex=2)
+
+plotIndiv(pca.clr, group = rep(iidata$arm,2), title = 'Rx')
+plotIndiv(pca.clr, group = rep(iidata$center,2), title = 'Center')
+plotIndiv(pca.clr, group = rep(iidata$group_whz_24,2), title = 'Nutritional Status')
+
+
+
+### run PCA 
+pca.clr <- pca(data.quantN_euk_g)
+plotIndiv(pca.clr, group = c(rep("T12",77), rep("T24",77)), title = 'TimePoint')
+plotVar(pca.clr, title = 'TimePoint', cex=2)
+
+plotIndiv(pca.clr, group = rep(iidata$arm,2), title = 'Rx')
+plotIndiv(pca.clr, group = rep(iidata$center,2), title = 'Center')
+plotIndiv(pca.clr, group = rep(iidata$group_whz_24,2), title = 'Nutritional Status')
+
+```
+
+
+
+### PCA on log values
+
+```{r}
+head(iidata)[,1:20]
+
+pca.clr <- pca(data.log_euk)
+plotIndiv(pca.clr, group = c(rep("T12",77), rep("T24",77)), title = 'TimePoint')
+plotVar(pca.clr, title = 'TimePoint', cex=2)
+
+plotIndiv(pca.clr, group = rep(iidata$arm,2), title = 'Rx')
+plotIndiv(pca.clr, group = rep(iidata$center,2), title = 'Center')
+plotIndiv(pca.clr, group = rep(iidata$group_whz_24,2), title = 'Nutritional Status')
+
+
+### run PCA 
+pca.clr <- pca(data.log_euk_g)
+plotIndiv(pca.clr, group = c(rep("T12",77), rep("T24",77)), title = 'TimePoint')
+plotVar(pca.clr, title = 'TimePoint', cex=2)
+
+plotIndiv(pca.clr, group = rep(iidata$arm,2), title = 'colored by Rx')
+plotIndiv(pca.clr, group = rep(iidata$center,2), title = 'colored by Center')
+plotIndiv(pca.clr, group = rep(iidata$group_whz_24,2), title = 'coloured by Nutritional Status')
+
+```
+
+
+
+
+# 5. PLS path model: 
+
+## Prep data
+
+```{r}
+### create data frame to feed into pls path models
+#colnames(idata)
+
+#iidata <- idata %>% dplyr::select(arm, center, contains("_bin_num"), whz_24 )
+# iidata <- cbind(idata[,c("arm", "center", "whz_24")], bac_data12.TSS, bac_data24.TSS, euk_data_12_bin, euk_data_24_bin )
+
+#iidata <- cbind(idata[,c("arm", "center", "whz_24","group_whz_24")], bac_data12.TSS, bac_data24.TSS, euk_data_12, euk_data_24 )
+
+### reorganising dataset to be wide
+colnames(data.clr)
+
+### pull out T12 samples(first 77 rows)
+clr.bac12<- data.clr[1:77,]
+colnames(clr.bac12)<- paste0("T12_", colnames(clr.bac12))
+### pull out T24 samples (last 77 rows)
+clr.bac24<- data.clr[78:154,]
+colnames(clr.bac24)<- paste0("T24_", colnames(clr.bac24))
+
+### pull out T12 eukaryote data (first 77 rows)
+clr.euk12<- data.clr_euk_g[1:77,]
+colnames(clr.euk12)<- paste0("T12_", colnames(clr.euk12))
+
+#clr.euk12<- data.log_euk_g[1:77,]
+#colnames(clr.euk12)<- paste0("T12_", colnames(clr.euk12))
+
+
+### pull out T24 eukaryote data (first 77 rows)
+clr.euk24<- data.clr_euk_g[78:154,]
+colnames(clr.euk24)<- paste0("T24_", colnames(clr.euk24))
+##log
+#clr.euk24<- data.log_euk_g[78:154,]
+#colnames(clr.euk24)<- paste0("T24_", colnames(clr.euk24))
+
+iidata<-cbind(iidata[,c("arm", "center", "group_whz_24")], 
+               clr.bac12,
+               clr.bac24,
+               clr.euk12,
+               clr.euk24)
+
+### check if missing data and need to impute
+iidata<- iidata[complete.cases(iidata),]
+which(is.na(iidata))
+
+
+iiidata<-iidata
+
+### make sure everything is numeric
+iidata<-data.frame(sapply(iidata, as.numeric ) )
+#iidata<- data.frame(iidata -1)
+str(iidata, list.len = ncol(iidata))
+
+
+## restrict to pls selected
+# names(include_Final)
+# 
+# colnames(iidata)
+# iidata <- cbind(iidata[,c("arm", "center","group_whz_24")] ,iidata[, colnames(iidata) %in% names(include_Final)] )
+# colnames(iidata)
+
+```
+
+
+
+### 5.1 M1 microbiome combined
+
+#### Full model
+
+```{r, include=F, eval=F}
+
+Treatment =c(0,0,0,0,0)
+Site = c(0,0,0,0,0)
+Microbiome12=c(1,1,0,0,0)
+Microbiome24=c(0,1,1,0,0)
+WHZ = c(1,1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Microbiome12, Microbiome24, WHZ)
+infl_path
+
+
+list_microbiome12<- iidata %>% dplyr::select(contains("T12_")) %>% colnames()
+list_microbiome24<- iidata %>% dplyr::select(contains("T24_")) %>% colnames()
+
+###
+inflam_blocks = list("arm", "center", list_microbiome12, list_microbiome24 , "whz_24")
+infl_modes = c("A","A","PLScore","PLScore","A")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                    rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+
+infl_pls
+
+
+
+```
+
+
+
+#### Trimmed model
+
+```{r, include=TRUE, eval=F}
+
+poor_loads <- infl_pls$outer_model$name[which(infl_pls$outer_model$loading <0.1)]
+iidata = iidata[, !colnames(iidata) %in% poor_loads]
+
+
+#### checking heterogeneity
+lib.size <- apply(iidata[,-c(1:3)], 1, sum)
+barplot(lib.size)
+#which(lib.size > 1200000)
+
+
+Treatment =c(0,0,0,0,0)
+Site = c(0,0,0,0,0)
+Microbiome12=c(1,1,0,0,0)
+Microbiome24=c(0,1,1,0,0)
+WHZ = c(0,1,1,1,0)
+
+infl_path = rbind(Treatment, Site, Microbiome12, Microbiome24, WHZ)
+infl_path
+
+list_microbiome12<- iidata %>% dplyr::select(contains("T12_")) %>% colnames()
+list_microbiome24<- iidata %>% dplyr::select(contains("T24_")) %>% colnames()
+
+###
+inflam_blocks = list("arm", "center", list_microbiome12, list_microbiome24 , "whz_24")
+infl_modes = c("A","A","PLScore","PLScore","A")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                    rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+
+Treatment =c(0,0,0,0,0)
+Site = c(0,0,0,0,0)
+Microbiome12=c(1,1,0,0,0)
+Microbiome24=c(0,1,1,0,0)
+WHZ = c(1,1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Microbiome12, Microbiome24, WHZ)
+infl_path
+
+
+list_microbiome12<- iidata %>% dplyr::select(contains("T12_")) %>% colnames()
+list_microbiome24<- iidata %>% dplyr::select(contains("T24_")) %>% colnames()
+
+###
+inflam_blocks = list("arm", "center", list_microbiome12, list_microbiome24 , "whz_24")
+infl_modes = c("A","A","PLScore","PLScore","A")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                    rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+
+
+```
+
+
+
+### 5.2 PLS path model: M2 microbiome and parasites only 
+
+#### Full model
+
+```{r, include= FALSE, eval=F}
+
+############################### split out parasites
+
+#Treatment =c(0,0,0,0,0)
+#Site = c(0,0,0,0,0)
+
+Parasite12=c(0,0,0,0)
+Microbiome12=c(1,0,0,0)
+
+Parasite24=c(1,1,0,0)
+Microbiome24=c(1,1,1,0)
+
+#WHZ = c(0,0,1,1,0)
+
+
+#infl_path = rbind(Treatment, Site, Microbiome12, Microbiome24,  WHZ)
+infl_path = rbind(Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+list_microbiome12
+
+colnames(iidata)
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+list_euk12
+
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+list_microbiome24
+
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_genus")) %>% colnames()
+list_euk24
+
+#inflam_blocks = list("arm", "center", list_microbiome12,  list_microbiome24, "whz_24")
+inflam_blocks = list(list_euk12, list_microbiome12, list_euk24, list_microbiome24)
+
+###  reflective indicators than to formative indicators
+infl_modes = c("PLScore","PLScore","PLScore","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(
+rep("num", length(inflam_blocks[[1]])),
+                                                                                    rep("num", length(inflam_blocks[[2]])),
+                                                                                     rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+```
+
+
+
+
+##### 5.2.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "Eukaryote12", "Bacteria12", 
+"Eukaryote24", "Bacteria24")
+
+head(cross_loadings)
+cross_loadings$block<-mgsub(as.character(cross_loadings$block),
+                            c("Parasite12","Microbiome12","Parasite12","Microbiome12"),
+                            c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"))
+
+# inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+# head(inner_model_euk12)
+# inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+# colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+# head(inner_model_euk12)
+# inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+# inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+# inner_model_euk12
+infl_pls$inner_model
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[1]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[2]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls$inner_model[[3]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+options(max.print=1000000)
+### Start writing to an output file
+sink(file=paste0("M2_EukBac_plsPath_model_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+
+### Trimmed model
+
+
+```{r, include= FALSE, eval=F}
+iidata <-iiidata
+poor_loads <- infl_pls$outer_model$name[which(infl_pls$outer_model$loading <0.1)]
+iidata = iidata[, !colnames(iidata) %in% poor_loads]
+iidata = iidata[, !colnames(iidata) %in% poor_loading]
+
+############################### split out parasites
+
+#Treatment =c(0,0,0,0,0)
+#Site = c(0,0,0,0,0)
+
+Parasite12=c(0,0,0,0)
+Microbiome12=c(1,0,0,0)
+
+Parasite24=c(1,1,0,0)
+Microbiome24=c(1,1,1,0)
+
+#WHZ = c(0,0,1,1,0)
+
+
+#infl_path = rbind(Treatment, Site, Microbiome12, Microbiome24,  WHZ)
+infl_path = rbind(Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+list_microbiome12
+
+colnames(iidata)
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+list_euk12
+
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+list_microbiome24
+
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_genus")) %>% colnames()
+list_euk24
+
+#inflam_blocks = list("arm", "center", list_microbiome12,  list_microbiome24, "whz_24")
+inflam_blocks = list(list_euk12, list_microbiome12, list_euk24, list_microbiome24)
+
+###  reflective indicators than to formative indicators
+infl_modes = c("PLScore","PLScore","PLScore","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(
+rep("num", length(inflam_blocks[[1]])),
+                                                                                    rep("num", length(inflam_blocks[[2]])),
+                                                                                     rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+
+
+```
+
+
+
+
+##### 5.2.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "Eukaryote12", "Bacteria12", 
+"Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<-mgsub(c("Parasite12","Microbiome12","Parasite12","Microbiome12"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"), cross_loadings$block)
+
+inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+# inner_model_bac24<-data.frame(infl_pls$inner_model[[4]] )  
+# head(inner_model_bac24)
+# inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+# colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+# head(inner_model_bac24)
+# inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+# inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+# inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+### Start writing to an output file
+sink(file=paste0("M2_EukBac_Trim_plsPath_model_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+
+
+#### Full model: Split out parasites
+
+
+```{r, include=F, eval=F}
+
+############################### split out parasites
+Treatment =c(0,0,0,0,0)
+Site = c(0,0,0,0,0)
+
+Parasite12=c(1,1,0,0,0)
+#Microbiome12=c(1,1,1,0,0,0,0)
+
+Parasite24=c(0,1,1,0,0)
+#Microbiome24=c(0,1,1,1,1,0,0)
+
+WHZ = c(1,1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Parasite12, Parasite24, WHZ)
+infl_path
+
+
+colnames(iidata)
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+list_euk12
+
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames()
+list_euk24
+
+
+inflam_blocks = list("arm", "center", list_euk12, list_euk24, "whz_24")
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A","A","A","A")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("ord", length(inflam_blocks[[2]])),
+                                                                                    rep("ord", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+
+#infl_pls1<-infl_pls  # ordered binned parasites, plscore (filtered)
+infl_pls2<-infl_pls   # ordered binned parasites, plscore (filtered), removed loading less than 0.2
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+poor_loading<-infl_pls$outer_model[which(abs(infl_pls$outer_model$loading) < 0.5), "name" ] 
+poor_loading
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+#### Full model: Split by Treatment
+
+
+##### creating treatment split datasets
+
+```{r, include=F, eval=F}
+
+colnames(iidata)
+
+#iidata$arm_cont <- ifelse(iidata$arm == 1, 1, 0)
+iidata$arm_mnp <- ifelse(iidata$arm == 2, 1, 0)
+iidata$arm_mnpz <- ifelse(iidata$arm == 3, 1, 0)
+
+############################### split out parasites
+# Treatment_cont =c(0,0,0,0,0,0,0,0)
+# Treatment_MNP =c(0,0,0,0,0,0,0,0)
+# Treatment_MNPz = c(0,0,0,0,0,0,0,0)
+# Site = c(0,0,0,0,0,0,0,0)
+# 
+# Parasite12=c(1,1,1,1,0,0,0,0)
+# Microbiome12=c(1,1,1,1,1,0,0,0)
+# 
+# Parasite24=c(0,0,0,1,1,1,0,0)
+# Microbiome24=c(0,0,0,1,1,1,1,0)
+
+
+
+
+
+
+colnames(iidata)
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+list_microbiome12
+
+colnames(iidata)
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+list_euk12
+
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+list_microbiome24
+
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_genus")) %>% colnames()
+list_euk24
+
+```
+
+
+#### MNP paths
+
+```{r}
+############################### split out parasites
+#Treatment_cont =c(0,0,0,0,0,0)
+Treatment_MNP =c(0,0,0,0,0,0)
+#Treatment_MNPz = c(0,0,0,0,0,0,0,0)
+Site = c(0,0,0,0,0,0)
+
+Parasite12=c(1,1,0,0,0,0)
+Microbiome12=c(1,1,1,0,0,0)
+
+Parasite24=c(0,1,1,1,0,0)
+Microbiome24=c(0,1,1,1,1,0)
+
+
+
+infl_path = rbind(#Treatment_cont,
+  Treatment_MNP,#Treatment_MNPz, 
+                  Site, 
+                  Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+inflam_blocks = list(#"arm_cont",
+  "arm_mnp", #"arm_mnpz", 
+                     "center",
+                     list_euk12, list_microbiome12,
+                     list_euk24, list_microbiome24)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A",#"A","A",
+               "PLScore","PLScore","PLScore","PLScore")
+
+
+summary(as.factor(iidata$arm))
+iidata_mnp<-subset(iidata, !iidata$arm_mnpz == 1)
+iidata_mnpz<-subset(iidata, !iidata$arm_mnp == 1)
+
+
+
+##############################
+### control vs. mnp 
+
+infl_pls = plspm(iidata_mnp, infl_path, inflam_blocks, modes = infl_modes, scaling=list(
+rep("nom", length(inflam_blocks[[1]])),
+                                                                                    #rep("nom", length(inflam_blocks[[2]])),
+                                                                                    #rep("nom", length(inflam_blocks[[3]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                    rep("num", length(inflam_blocks[[4]])),
+                                                                                     rep("num", length(inflam_blocks[[5]])),
+                                                                                    rep("num", length(inflam_blocks[[6]])) ), 
+                 boot.val = T)
+ 
+
+summary(infl_pls)
+
+
+infl_pls_control_vs_mnp<-infl_pls
+
+
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+poor_loading<-infl_pls$outer_model[which(abs(infl_pls$outer_model$loading) < 0.5), "name" ] 
+poor_loading
+```
+
+
+
+
+##### 5.3.1.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+
+infl_pls <- infl_pls_control_vs_mnp
+
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Treatment_MNP","Site","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "MNP","Site", 
+                              "Eukaryote12", "Bacteria12", 
+                              "Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<- as.character(cross_loadings$block)
+cross_loadings$block<-mgsub(cross_loadings$block, c("Parasite12","Microbiome12","Parasite24","Microbiome24"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"))
+
+inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls$inner_model[[4]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("MNP","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("MNP","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("MNP","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+options(max.print=1000000)
+### Start writing to an output file
+sink(file=paste0("M3_MNP_Site_EukBac_plsPath_model_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+#### MNPz paths
+
+
+```{r}
+#########################
+### control vs. mnpz
+
+############################### split out parasites
+#Treatment_cont =c(0,0,0,0,0,0)
+#Treatment_MNP =c(0,0,0,0,0,0)
+Treatment_MNPz = c(0,0,0,0,0,0)
+Site = c(0,0,0,0,0,0)
+
+Parasite12=c(1,1,0,0,0,0)
+Microbiome12=c(1,1,1,0,0,0)
+
+Parasite24=c(0,1,1,1,0,0)
+Microbiome24=c(0,1,1,1,1,0)
+
+
+
+infl_path = rbind(#Treatment_cont, Treatment_MNP,
+                  Treatment_MNPz, 
+                  Site, 
+                  Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+inflam_blocks = list(#"arm_cont",
+  #"arm_mnp", 
+  "arm_mnpz", 
+                     "center",
+                     list_euk12, list_microbiome12,
+                     list_euk24, list_microbiome24)
+
+infl_pls = plspm(iidata_mnpz, infl_path, inflam_blocks, modes = infl_modes, scaling=list(
+rep("nom", length(inflam_blocks[[1]])),
+                                                                                    #rep("nom", length(inflam_blocks[[2]])),
+                                                                                    #rep("nom", length(inflam_blocks[[3]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                    rep("num", length(inflam_blocks[[4]])),
+                                                                                     rep("num", length(inflam_blocks[[5]])),
+                                                                                    rep("num", length(inflam_blocks[[6]])) ), 
+                 boot.val = T)
+ 
+
+summary(infl_pls)
+
+
+
+infl_pls_control_vs_mnpz<-infl_pls
+
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+poor_loading<-infl_pls$outer_model[which(abs(infl_pls$outer_model$loading) < 0.5), "name" ] 
+poor_loading
+
+
+```
+
+
+
+
+##### 5.3.1.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+
+infl_pls <- infl_pls_control_vs_mnpz
+
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Treatment_MNPz","Site","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "MNPz","Site", 
+                              "Eukaryote12", "Bacteria12", 
+                              "Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<- as.character(cross_loadings$block)
+cross_loadings$block<-mgsub(cross_loadings$block, c("Parasite12","Microbiome12","Parasite24","Microbiome24"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"))
+
+inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls$inner_model[[4]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("MNPz","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("MNPz","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("MNPz","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+options(max.print=1000000)
+### Start writing to an output file
+sink(file=paste0("M3_MNPz_Site_EukBac_plsPath_model_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+
+
+
+
+#### MNP and Zinc paths
+
+
+```{r}
+#########################
+### control vs. mnpz
+iidata$supp <- ifelse(iidata$arm_cont==1,1,0)
+iidata$zinc <- ifelse(iidata$arm_mnpz==1,1,0)
+
+
+############################### split out parasites
+#Treatment_cont =c(0,0,0,0,0,0)
+#Zinc = c(0,0,0,0,0,0,0)
+MNP =c(0,0,0,0,0,0)
+Site = c(0,0,0,0,0,0)
+
+Parasite12=c(1,1,0,0,0,0)
+Microbiome12=c(1,1,1,0,0,0)
+
+Parasite24=c(0,1,1,1,0,0)
+Microbiome24=c(0,1,1,1,1,0)
+
+
+
+infl_path = rbind(#Treatment_cont, 
+                  #Zinc,
+                  MNP,
+                  Site, 
+                  Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A", #"A",#"A",
+               "PLScore","PLScore","PLScore","PLScore")
+
+
+list_suppl <- c("supp", "zinc")
+
+inflam_blocks = list("supp",
+  #list_suppl, 
+  #"zinc", 
+                     "center",
+                     list_euk12, list_microbiome12,
+                     list_euk24, list_microbiome24)
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(
+rep("nom", length(inflam_blocks[[1]])),
+                                                                                    #rep("nom", length(inflam_blocks[[2]])),
+                                                                                    #rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                    rep("num", length(inflam_blocks[[4]])),
+                                                                                     rep("num", length(inflam_blocks[[5]])),
+                                                                                    rep("num", length(inflam_blocks[[6]])) 
+), 
+                 boot.val = T)
+ 
+
+summary(infl_pls)
+
+
+
+infl_pls_mnp_vs_mnpz<-infl_pls
+
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+poor_loading<-infl_pls$outer_model[which(abs(infl_pls$outer_model$loading) < 0.5), "name" ] 
+poor_loading
+
+
+```
+
+
+#### Groups comparisons
+
+```{r, include =T, eval=T}
+### set group as factor
+iidata$zinc <- as.factor(iidata$zinc)
+iidata$center <- as.factor(iidata$center)
+iidata$arm <- as.factor(iidata$arm)
+iidata$group_whz_24 <- as.factor(iidata$group_whz_24)
+
+### run group comparison on full model
+boot.group<-plspm.groups(infl_pls, group=iidata$zinc, method="bootstrap")
+boot.group
+
+### Start writing to an output file
+sink(file=paste0("M3_Full_plsPath_model_GroupCompare_WHz_", Sys.Date() , ".txt"))
+boot.group
+### stop sink
+sink()
+```
+
+
+
+##### 5.3.1.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+
+infl_pls <- infl_pls_control_vs_mnpz
+
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Treatment_MNPz","Site","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "MNPz","Site", 
+                              "Eukaryote12", "Bacteria12", 
+                              "Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<- as.character(cross_loadings$block)
+cross_loadings$block<-mgsub(cross_loadings$block, c("Parasite12","Microbiome12","Parasite24","Microbiome24"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"))
+
+inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls$inner_model[[4]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("MNPz","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("MNPz","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("MNPz","Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+options(max.print=1000000)
+### Start writing to an output file
+sink(file=paste0("M3_MNPz_Site_EukBac_plsPath_model_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+
+### 5.2 PLS path model: Site with M3 microbiome & euk split out
+
+#### 5.2.1 Full model
+
+```{r, include= FALSE, eval=T}
+
+############################### split out parasites
+#Treatment =c(0,0,0,0,0,0)
+Site = c(0,0,0,0,0)
+
+Parasite12=c(1,0,0,0,0)
+Microbiome12=c(1,1,0,0,0)
+
+Parasite24=c(1,1,1,0,0)
+Microbiome24=c(1,1,1,1,0)
+
+
+infl_path = rbind(Site, Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+### make list to use
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+
+#list_euk12<- iidata %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+#list_euk12<- iidata_bin %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+
+#list_euk24<- iidata %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+#list_euk24 <- iidata_bin %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_genus")) %>% colnames()
+
+
+inflam_blocks = list("center", 
+                     list_euk12, list_microbiome12, 
+                     list_euk24,list_microbiome24)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","PLScore","PLScore","PLScore","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("num", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])) ), 
+                 boot.val = TRUE)
+
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+```
+
+
+
+
+##### 5.3.1.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+
+
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Site","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "Site", "Eukaryote12", "Bacteria12", 
+"Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<-mgsub(c("Parasite12","Microbiome12","Parasite12","Microbiome12"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"),cross_loadings$block)
+
+inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls$inner_model[[4]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+### Start writing to an output file
+sink(file=paste0("M3_SiteEukBac_plsPath_model_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+
+
+### 5.2 PLS path model: Site with M3 microbiome & euk split out
+
+#### 5.2.1 Full model
+
+```{r, include= FALSE, eval=T}
+iidata<-iiidata
+############################### split out parasites
+#Treatment =c(0,0,0,0,0)
+Site = c(0,0,0,0,0)
+
+Parasite12=c(1,0,0,0,0)
+Microbiome12=c(1,1,0,0,0)
+
+Parasite24=c(1,1,1,0,0)
+Microbiome24=c(1,1,1,1,0)
+
+
+infl_path = rbind(Site, Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+#iidata<-subset(iidata, !iidata$arm == "2")
+#iidata<-subset(iidata, !iidata$arm == "3")
+iidata<-subset(iidata, !iidata$arm == "1")
+summary(factor(iidata$center))
+
+### make list to use
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+
+#list_euk12<- iidata %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+#list_euk12<- iidata_bin %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+
+#list_euk24<- iidata %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+#list_euk24 <- iidata_bin %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_genus")) %>% colnames()
+
+
+inflam_blocks = list("center", 
+                     list_euk12, list_microbiome12, 
+                     list_euk24,list_microbiome24)
+inflam_blocks
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","PLScore","PLScore","PLScore","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("num", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])) ), 
+                 boot.val = TRUE)
+
+
+summary(infl_pls)
+dev.off()
+
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+```
+
+
+
+
+##### 5.3.1.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Treatment","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "Treatment", "Eukaryote12", "Bacteria12", 
+"Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<-mgsub(c("Parasite12","Microbiome12","Parasite12","Microbiome12"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"),cross_loadings$block)
+
+inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls$inner_model[[4]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("Treatment", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("Treatment", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("Treatment", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+### Start writing to an output file
+sink(file=paste0("M3_RxEukBac_plsPath_model_", Sys.Date() , ".txt"), split=FALSE)
+options(max.print = 5000)
+        print(Table_list)
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+
+
+### 5.3 PLS path model: M3 microbiome & euk split out
+
+#### 5.3.1 Full model
+
+```{r, include= FALSE, eval=T}
+iidata<-iiidata
+############################### split out parasites
+Treatment =c(0,0,0,0,0,0)
+Site = c(0,0,0,0,0,0)
+
+Parasite12=c(1,1,0,0,0,0)
+Microbiome12=c(1,1,1,0,0,0)
+
+Parasite24=c(0,1,1,1,0,0)
+Microbiome24=c(0,1,1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+### make list to use
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+
+#list_euk12<- iidata %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+#list_euk12<- iidata_bin %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+
+#list_euk24<- iidata %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+#list_euk24 <- iidata_bin %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_genus")) %>% colnames()
+
+
+inflam_blocks = list("arm", "center", 
+                     list_euk12, list_microbiome12, 
+                     list_euk24,list_microbiome24)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A","PLScore","PLScore","PLScore","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])),
+                                                                                     rep("num", length(inflam_blocks[[6]])) ), 
+                 boot.val = TRUE)
+
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+```
+
+
+
+
+##### 5.3.1.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+summary(infl_pls)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls$outer_model 
+head(outer_model)
+### change order and select
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Treatment","Site","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+head(cross_loadings)
+colnames(cross_loadings) <- c("block", "name", "Treatment", "Site", "Eukaryote12", "Bacteria12", 
+"Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<-mgsub(as.character(cross_loadings$block), c("Parasite12","Microbiome12","Parasite12","Microbiome12"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"))
+
+
+inner_model_euk12<-data.frame(infl_pls$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+
+
+inner_model_bac12<-data.frame(infl_pls$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls$inner_model[[4]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("Treatment", "Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("Treatment", "Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("Treatment", "Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls$scores        #  latent variable scores
+#infl_pls$unidim         # unidimensionality
+#infl_pls$path_coefs   #   path coefficients matrix
+#infl_pls$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls$boot
+#infl_pls$boot[[1]]           # bootstrap results  
+#infl_pls$boot[[2]]   
+boot_paths<-infl_pls$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### R square for boot strap
+boot_rsq<-infl_pls$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### Effect through boot strap
+boot_effects<-infl_pls$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+rownames(boot_effects) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_effects
+
+```
+
+
+##### 5.3.1.2 Saving results: pls.pm
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+
+
+#### cleaning output and adding TAXA
+Table_list$`Outer model`$name <- mgsub(as.character(Table_list$`Outer model`$name), 
+                                c("T12_genus_euk_", "T12_", "T24_genus_euk_","T24_"),
+                                c("", "", "","") )
+
+Table_list$`Outer model`
+str(Table_list$`Outer model`)
+
+head(taxa_euk)
+taxa_euk$name <- row.names(taxa_euk) 
+taxa_euk <-taxa_euk[,colnames(taxa_euk) %in% c("name","kingdom","family","genus")]
+
+head(taxa_otu)
+taxa_otu$name <- row.names(taxa_otu) 
+taxa_otu <-taxa_otu[,colnames(taxa_otu) %in% c("name","family","genus","species")]
+head(taxa_otu)
+str(taxa_otu)
+taxa_otu$name
+
+Table_list$`Outer model`$name %in% taxa_otu$name
+
+
+Table_list$`Outer model`<- left_join(Table_list$`Outer model`, taxa_euk, by="name"  )
+Table_list$`Outer model`
+
+Table_list$`Outer model`<- merge(Table_list$`Outer model`, taxa_otu, by=c("name"), all.x=T)
+Table_list$`Outer model`
+
+
+
+
+options(max.print=1000000)
+### Start writing to an output file
+sink(file=paste0("M3_Full_plsPath_model_test_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+
+
+#pdf(file="all_outer.plot.pdf", height=15, width=15)
+#plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+#dev.off()
+
+
+```
+
+
+
+#### 5.3.2 Trimmed model
+
+
+```{r, include= FALSE, eval =T}
+iidata <-iiidata
+poor_loading<-infl_pls$outer_model[which(abs(infl_pls$outer_model$loading) < 0.05), "name" ] 
+poor_loading
+
+
+iidata = iidata[, !colnames(iidata) %in% poor_loading]
+colnames(iidata)
+
+#### checking heterogeneity
+#lib.size <- apply(iidata[,-c(1:3)], 1, sum)
+#barplot(lib.size)
+#which(lib.size > 1200000)
+
+############################### split out parasites
+
+Treatment =c(0,0,0,0,0,0)
+Site = c(0,0,0,0,0,0)
+
+Parasite12=c(1,1,0,0,0,0)
+Microbiome12=c(1,1,1,0,0,0)
+
+Parasite24=c(0,1,1,1,0,0)
+Microbiome24=c(0,1,1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Parasite12, Microbiome12, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+### make list to use
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+
+#list_euk12<- iidata %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+#list_euk12<- iidata_bin %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+
+#list_euk24<- iidata %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+#list_euk24 <- iidata_bin %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames() 
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_genus")) %>% colnames()
+
+
+inflam_blocks = list("arm", "center", 
+                     list_euk12, list_microbiome12, 
+                     list_euk24,list_microbiome24)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A","PLScore","PLScore","PLScore","PLScore")
+
+
+infl_pls_trim = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])),
+                                                                                    rep("num", length(inflam_blocks[[5]])),
+                                                                                     rep("num", length(inflam_blocks[[6]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls_trim)
+
+
+plot(infl_pls_trim, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+
+
+plot(infl_pls_trim, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+#infl_pls_trim
+
+
+```
+
+
+
+#### Groups comparisons
+
+```{r, include =T, eval=T}
+### set group as factor
+iidata$group_whz_24 <- as.factor(iidata$group_whz_24)
+iidata$center <- as.factor(iidata$center)
+iidata$arm <- as.factor(iidata$arm)
+
+### run group comparison on full model
+boot.group<-plspm.groups(infl_pls, iidata$group_whz_24, method="bootstrap")
+boot.group
+
+### Start writing to an output file
+sink(file=paste0("M3_Full_plsPath_model_GroupCompare_WHz_", Sys.Date() , ".txt"))
+boot.group
+### stop sink
+sink()
+
+
+
+boot.group<-plspm.groups(infl_pls, iidata$center, method="bootstrap")
+boot.group
+
+### Start writing to an output file
+sink(file=paste0("M3_Full_plsPath_model_GroupCompare_Site_", Sys.Date() , ".txt"))
+boot.group
+### stop sink
+sink()
+
+
+boot.group<-plspm.groups(infl_pls, iidata$arm, method="bootstrap")
+boot.group
+
+### run group comparison on trim model
+boot.group<-plspm.groups(infl_pls_trim, iidata$group_whz_24, method="bootstrap")
+boot.group
+
+```
+
+
+##### 5.3.2.1 Cleaning result tables: pls.pm
+
+
+```{r, include= FALSE}
+summary(infl_pls_trim)[6]
+
+#ggarrange(
+
+outer_model<-infl_pls_trim$outer_model 
+head(outer_model)
+outer_model <- outer_model[,c("block","name", "loading","communality","redundancy")]
+outer_model[,-c(1:2)] <- signif(outer_model[,-c(1:2)], digits=2)
+head(outer_model)
+
+
+cross_loadings<-infl_pls_trim$crossloadings #   cross-loadings
+head(cross_loadings)
+cross_loadings <- cross_loadings[,c("block","name","Treatment","Site","Parasite12","Microbiome12","Parasite24","Microbiome24")]
+cross_loadings[,-c(1:2)] <- signif(cross_loadings[,-c(1:2)], digits=2)
+colnames(cross_loadings) <- c("block", "name", "Treatment", "Site", "Eukaryote12", "Bacteria12", 
+"Eukaryote24", "Bacteria24")
+head(cross_loadings)
+cross_loadings$block<-mgsub(c("Parasite12","Microbiome12","Parasite12","Microbiome12"), c("Eukaryote12","Bacteria12","Eukaryote24","Bacteria24"),cross_loadings$block)
+
+inner_model_euk12<-data.frame(infl_pls_trim$inner_model[[1]])  
+head(inner_model_euk12)
+inner_model_euk12<- inner_model_euk12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk12) <- c("Estimate","SE", "p-value")
+head(inner_model_euk12)
+inner_model_euk12 <- signif(inner_model_euk12, digits=2)
+inner_model_euk12$p <- stars.pval(inner_model_euk12$"p-value")
+inner_model_euk12
+
+inner_model_bac12<-data.frame(infl_pls_trim$inner_model[[2]])   
+head(inner_model_bac12)
+inner_model_bac12<- inner_model_bac12[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac12) <- c("Estimate","SE", "p-value")
+head(inner_model_bac12)
+inner_model_bac12 <- signif(inner_model_bac12, digits=2)
+inner_model_bac12$p <- stars.pval(inner_model_bac12$"p-value")
+inner_model_bac12
+
+
+inner_model_euk24<-data.frame(infl_pls_trim$inner_model[[3]])
+head(inner_model_euk24)
+inner_model_euk24<- inner_model_euk24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_euk24) <- c("Estimate","SE", "p-value")
+head(inner_model_euk24)
+inner_model_euk24 <- signif(inner_model_euk24, digits=2)
+inner_model_euk24$p <- stars.pval(inner_model_euk24$"p-value")
+inner_model_euk24
+
+
+inner_model_bac24<-data.frame(infl_pls_trim$inner_model[[4]] )  
+head(inner_model_bac24)
+inner_model_bac24<- inner_model_bac24[-1,c("Estimate","Std..Error","Pr...t..")]
+colnames(inner_model_bac24) <- c("Estimate","SE", "p-value")
+head(inner_model_bac24)
+inner_model_bac24 <- signif(inner_model_bac24, digits=2)
+inner_model_bac24$p <- stars.pval(inner_model_bac24$"p-value")
+inner_model_bac24
+
+
+model_correlations<-data.frame(summary(infl_pls_trim)$correlations)  
+head(model_correlations)
+colnames(model_correlations) <- c("Treatment", "Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+rownames(model_correlations) <- c("Treatment", "Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+model_correlations
+model_correlations <- signif(model_correlations, digits=2)
+model_correlations
+
+
+inner_summary<-data.frame(infl_pls_trim$inner_summary)  #  inner model
+head(inner_summary)
+colnames(inner_summary) <- c("Type", "R2", "Communality", "Redundancy", "AVE")
+inner_summary
+rownames(inner_summary) <- c("Treatment", "Site", "Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+inner_summary
+inner_summary[,-c(1)] <- signif(inner_summary[,-c(1)], digits=2)
+inner_summary
+
+GOF_model<-signif(infl_pls_trim$gof, digits=2) 
+GOF_model
+
+
+path_effect <- infl_pls_trim$effects
+head(path_effect)
+colnames(path_effect) <- c("Relationships", "Direct", "Indirect", "Total")
+path_effect
+path_effect[,-c(1)] <- signif(path_effect[,-c(1)], digits=2)
+path_effect
+
+
+### other results
+#infl_pls_trim$scores        #  latent variable scores
+#infl_pls_trim$unidim         # unidimensionality
+#infl_pls_trim$path_coefs   #   path coefficients matrix
+#infl_pls_trim$data           # data matrix
+
+
+
+###############################
+### Bootstrapping results
+
+#infl_pls_trim$boot
+#infl_pls_trim$boot[[1]]           # bootstrap results  
+#infl_pls_trim$boot[[2]]   
+boot_paths<-infl_pls_trim$boot$paths
+head(boot_paths)
+colnames(boot_paths) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_paths
+boot_paths <- signif(boot_paths, digits=2)
+boot_paths
+
+
+
+### R square for boot strap
+boot_rsq<-infl_pls_trim$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### R square for boot strap
+boot_rsq<-infl_pls_trim$boot$rsq
+head(boot_rsq)
+colnames(boot_rsq) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_rsq
+boot_rsq <- signif(boot_rsq, digits=2)
+rownames(boot_rsq) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_rsq
+
+
+### Effect through boot strap
+boot_effects<-infl_pls_trim$boot$total.efs
+head(boot_effects)
+colnames(boot_effects) <- c("Original", "Bootstrap", "SE", "Lower CI", "Upper CI")
+boot_effects
+boot_effects <- signif(boot_effects, digits=2)
+rownames(boot_effects) <- c("Eukaryotes12", "Bacteria12", "Eukaryotes24", "Bacteria24")
+boot_effects
+
+```
+
+
+##### 5.3.2.2 Saving results: pls.pm
+
+
+```{r, include=T, result="asis"}
+
+Table_list<-list("Goodness-of-fit"= GOF_model,
+                 "Inner Summary"=inner_summary,
+                 "Path effects"=path_effect, 
+                 "Inner models"= list("Eukarotes12"=inner_model_euk12, "Bacteria12"=inner_model_bac12,
+"Eukarotes24"=inner_model_euk24, "Bacteria24"=inner_model_bac24),
+                 "Bootstrap: Direct paths"= boot_paths, 
+                 "R-squared"=boot_rsq,
+                 #"Bootstrap: Direct and indirect paths"= boot_effects, 
+                  "Correlations"= model_correlations,
+"Outer model"= outer_model,
+"Cross Loadings"= cross_loadings
+)
+
+### Start writing to an output file
+sink(file=paste0("M3_Trim_plsPath_model_", Sys.Date() , ".txt"))
+Table_list
+### stop sink
+sink()
+
+
+  for(i in 1:length(Table_list)) {
+  print(
+    kable(x = Table_list[i])
+        )
+  }
+
+
+#
+pdf(file="all_outer.plot.pdf", height=15, width=15)
+plot(infl_pls,what="loadings", cex=1,box.cex=1,box.size = 0.04)
+dev.off()
+
+
+```
+
+
+
+### 5.5 Model4: By timepoint
+
+#### T12 Full
+
+```{r, include= FALSE, eval=F}
+
+### create data frame to feed into pls path models
+colnames(idata)
+
+#iidata <- idata %>% dplyr::select(arm, center, contains("_bin_num"), whz_24 )
+iidata <- cbind(idata[,c("arm", "center")], bac_data12.TSS, bac_data24.TSS, euk_data_bin )
+
+
+iidata = iidata[, !colnames(iidata) %in% poor_loading]
+#str(iidata)
+
+### check if missing data and need to impute
+iidata<- iidata[complete.cases(iidata),]
+which(is.na(iidata))
+
+### make sure everything is numeric
+iidata<-data.frame(sapply(iidata, as.numeric ) )
+#iidata<- data.frame(iidata -1)
+str(iidata, list.len = ncol(iidata))
+
+
+#### checking heterogeneity
+lib.size <- apply(iidata[,-c(1:3)], 1, sum)
+barplot(lib.size)
+#which(lib.size > 1200000)
+
+
+
+############################### split out parasites
+
+Treatment=c(0,0,0)
+Site = c(0,0,0)
+
+Parasite12=c(1,1,0)
+#Microbiome12=c(1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Parasite12)
+infl_path
+
+
+colnames(iidata)
+### make list to use
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+
+list_euk12<- iidata %>% dplyr::select(starts_with("T12_j") | starts_with("T12_m")) %>% colnames()
+#list_euk12<- iidata %>% dplyr::select(starts_with("T12_genus")) %>% colnames()
+
+
+
+inflam_blocks = list("arm", "center", list_euk12)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                     rep("num", length(inflam_blocks[[3]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+```
+
+
+#### T12 Trimmed
+
+
+
+```{r, include= FALSE, eval=F}
+
+### create data frame to feed into pls path models
+colnames(idata)
+#iidata <- idata %>% dplyr::select(arm, center, contains("_bin_num"), whz_24 )
+iidata <- cbind(idata[,c("arm", "center", "whz_24")], bac_data12.TSS, bac_data24.TSS, euk_data_bin )
+
+poor_loading_LIST <- poor_loading
+iidata = iidata[, !colnames(iidata) %in% poor_loading]
+#str(iidata)
+
+### check if missing data and need to impute
+iidata<- iidata[complete.cases(iidata),]
+which(is.na(iidata))
+
+### make sure everything is numeric
+iidata<-data.frame(sapply(iidata, as.numeric ) )
+#iidata<- data.frame(iidata -1)
+str(iidata, list.len = ncol(iidata))
+
+
+#### checking heterogeneity
+lib.size <- apply(iidata[,-c(1:3)], 1, sum)
+barplot(lib.size)
+#which(lib.size > 1200000)
+
+
+
+############################### split out parasites
+
+Treatment=c(0,0,0)
+Site = c(0,0,0)
+
+#Parasite12=c(1,1,0)
+Microbiome12=c(1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Microbiome12)
+infl_path
+
+
+colnames(iidata)
+list_microbiome12<- iidata %>% dplyr::select(starts_with("T12_O")) %>% colnames()
+list_microbiome12
+
+inflam_blocks = list("arm", "center", list_microbiome12)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A","A")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                     rep("num", length(inflam_blocks[[3]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+
+poor_loading<-infl_pls$outer_model[which(abs(infl_pls$outer_model$loading) < 0.3), "name" ] 
+poor_loading
+
+
+```
+
+
+
+
+#### T24 Full
+
+```{r, include= FALSE, eval=F}
+
+
+############################### split out parasites
+
+Treatment=c(0,0,0,0)
+Site = c(0,0,0,0)
+
+Parasite24=c(1,1,0,0)
+Microbiome24=c(1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames()
+
+
+inflam_blocks = list("arm", "center", list_euk24, list_microbiome24)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A","PLScore","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+```
+
+
+
+#### T24 Trimmed
+
+
+
+```{r, include= FALSE, eval=F}
+
+
+############################### split out parasites
+
+Treatment=c(0,0,0,0)
+Site = c(0,0,0,0)
+
+Parasite24=c(1,1,0,0)
+Microbiome24=c(1,1,1,0)
+
+
+infl_path = rbind(Treatment, Site, Parasite24, Microbiome24)
+infl_path
+
+
+colnames(iidata)
+list_microbiome24<- iidata %>% dplyr::select(starts_with("T24_O")) %>% colnames()
+list_euk24<- iidata %>% dplyr::select(starts_with("T24_j") | starts_with("T24_m")) %>% colnames()
+
+
+inflam_blocks = list("arm", "center", list_euk24, list_microbiome24)
+
+
+###  reflective indicators than to formative indicators
+infl_modes = c("A","A","PLScore","PLScore")
+
+
+infl_pls = plspm(iidata, infl_path, inflam_blocks, modes = infl_modes, scaling=list(rep("nom", length(inflam_blocks[[1]])),
+                                                                                    rep("nom", length(inflam_blocks[[2]])),
+                                                                                    rep("num", length(inflam_blocks[[3]])),
+                                                                                     rep("num", length(inflam_blocks[[4]])) ), 
+                 boot.val = TRUE)
+ 
+
+summary(infl_pls)
+plot(infl_pls, what = "inner", box.size = 0.06, cex=0.8, box.cex=0.8, txt.col = "black", arr.tcol="black")
+plot(infl_pls, what="loadings",box.size = 0.10, cex=0.8, box.cex=0.8, arr.tcol="black")
+infl_pls
+
+```
+
+
+
+
