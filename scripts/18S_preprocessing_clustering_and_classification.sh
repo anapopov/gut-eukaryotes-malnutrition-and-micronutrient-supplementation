@@ -137,7 +137,7 @@ usearch11.0.667 -makeudb_usearch SILVA_138_SSURef_NR99_V4V5_Eukaryota_dereplicat
 # run OTU classification
 usearch11.0.667 -sintax Samples_merged_uclust_min5_otu-matched_97.fasta -db /media/sf_VirtualBox_Files/ReferenceDB/SilvaDB/v138/SILVA_138_SSURef_NR99_V4V5_Eukaryota_clust97.udb -tabbedout Samples_merged_derep_USEARCH_classified_SILVA138V4V5_clust97_MOD.txt -strand both -sintax_cutoff 0.8
 
-usearch11.0.667 -sintax Samples_joined_uclust_min5_otu-matched_97.fasta -db /media/sf_VirtualBox_Files/ReferenceDB/SilvaDB/v138/SILVA_138_SSURef_NR99_V4V5_Eukaryota_clust97.udb -tabbedout Samples_merged_derep_USEARCH_classified_SILVA138V4V5_clust97_MOD.txt -strand both -sintax_cutoff 0.8
+usearch11.0.667 -sintax Samples_joined_uclust_min5_otu-matched_97.fasta -db /media/sf_VirtualBox_Files/ReferenceDB/SilvaDB/v138/SILVA_138_SSURef_NR99_V4V5_Eukaryota_clust97.udb -tabbedout Samples_joined_derep_USEARCH_classified_SILVA138V4V5_clust97_MOD.txt -strand both -sintax_cutoff 0.8
 
 
 # Classification III. unassigned OTUs are submitted for BLAST against the NCBI nt database (downloaded Nov 28, 2017)
