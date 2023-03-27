@@ -141,9 +141,10 @@ usearch11.0.667 -sintax Samples_joined_uclust_min5_otu-matched_97.fasta -db /med
 
 
 # Classification III. unassigned OTUs are submitted for BLAST against the NCBI nt database (downloaded Nov 28, 2017)
+blastn -db NCBI_nt/nt -query Samples_merged_uclust_min5_otu-matched_97.fasta -out OTU_merged_BLAST_NCBInt.out -evalue 0.001  -max_target_seqs 5 -max_hsps 1 -outfmt 6
+
+blastn -db NCBI_nt/nt -query Samples_joined_uclust_min5_otu-matched_97.fasta -out OTU_joined_BLAST_NCBInt.out -evalue 0.001  -max_target_seqs 5 -max_hsps 1 -outfmt 6
 
 # all three sets of results merged, and classification method label added
-
-
 
 echo "Complete."
